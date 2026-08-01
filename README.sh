@@ -2,9 +2,12 @@
 BLOCK='```'
 
 cat <<EOF >README.md
-# [sysz](https://github.com/joehillen/sysz)
+# [sysz](https://github.com/rorph/sysz)
 
 A [fzf](https://github.com/junegunn/fzf) terminal UI for systemctl
+
+Fork of [joehillen/sysz](https://github.com/joehillen/sysz) with Debian packaging,
+back-navigation from the command picker, and improved log follow.
 
 # Demo
 
@@ -20,6 +23,9 @@ VERSION: $(cat VERSION)
 - Runs \`sudo\` automatically and only if necessary.
 - Filter units by state using \`ctrl-s\` or the \`--state\` option.
 - Run \`daemon-reload\` with \`ctrl-r\`.
+- Follow unit logs with \`ctrl-f\` or the \`follow\` / \`f\` command.
+- Back from the Commands menu (ESC / ctrl-b / ← / select **back**) returns to Units.
+- After any action, returns to the unit list instead of dropping to the shell.
 - Has short versions of systemctl commands to reduce typing.
 - Runs status after other commands (start, stop, restart, etc).
 - Select multiple units, states, and commands using \`TAB\`.
@@ -33,6 +39,23 @@ VERSION: $(cat VERSION)
 - awk
 
 # Installation
+
+## Debian / Ubuntu (.deb)
+
+Build a package that declares the \`fzf\` dependency:
+
+${BLOCK}sh
+git clone https://github.com/rorph/sysz.git
+cd sysz
+make deb                    # → dist/sysz_*_all.deb
+sudo apt install ./dist/sysz_*_all.deb
+${BLOCK}
+
+\`Depends: bash (>= 4.3), fzf (>= 0.27.1)\` — apt will pull \`fzf\` if missing.
+
+CI builds the same package on every push/PR (GitHub Actions workflow artifact
+\`sysz-deb\`) and attaches \`sysz_*.deb\` to [GitHub Releases](https://github.com/rorph/sysz/releases)
+next to the bare script.
 
 ## Arch Linux
 
@@ -55,20 +78,20 @@ ${BLOCK}
 ## Using [\`bin\`](https://github.com/marcosnils/bin)
 
 ${BLOCK}
-bin install https://github.com/joehillen/sysz
+bin install https://github.com/rorph/sysz
 ${BLOCK}
 
 ## Direct Download
 
 ${BLOCK}sh
-wget -O ~/.bin/sysz https://github.com/joehillen/sysz/releases/latest/download/sysz
+wget -O ~/.bin/sysz https://github.com/rorph/sysz/releases/latest/download/sysz
 chmod +x ~/.bin/sysz
 ${BLOCK}
 
 ## From Source
 
 ${BLOCK}sh
-git clone https://github.com/joehillen/sysz.git
+git clone https://github.com/rorph/sysz.git
 cd sysz
 sudo make install # /usr/local/bin/sysz
 ${BLOCK}
@@ -81,7 +104,8 @@ ${BLOCK}
 
 # Acknowledgements
 
-Inspired by [fuzzy-sys](https://github.com/NullSense/fuzzy-sys) by [NullSense](https://github.com/NullSense/)
+Upstream: [joehillen/sysz](https://github.com/joehillen/sysz).
+Inspired by [fuzzy-sys](https://github.com/NullSense/fuzzy-sys) by [NullSense](https://github.com/NullSense/).
 
 Thank you for [ShellCheck](https://github.com/koalaman/shellcheck) without which this would be a buggy mess.
 EOF

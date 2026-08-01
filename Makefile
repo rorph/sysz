@@ -1,16 +1,16 @@
 VERSION := $(shell cat VERSION)
 ARCHIVE := sysz-$(VERSION).tar.gz
-.PHONY: install clean release archive
-.ONESHELL: aur-release
+.PHONY: install clean release archive deb test lint
 
 sysz: VERSION
 	sed -i -e "s/^SYSZ_VERSION=.*/SYSZ_VERSION=$(VERSION)/" sysz
 
 $(ARCHIVE): sysz CHANGELOG.md README.md
-	git archive --format=tar.gz -o $(ARCHIVE) --prefix sysz-$(VERSION)/ $(VERSION)
+	git archive --format=tar.gz -o $(ARCHIVE) --prefix sysz-$(VERSION)/ HEAD
 
 clean:
-	/bin/rm -f README.md
+	/bin/rm -f README.md $(ARCHIVE)
+	/bin/rm -rf dist/
 
 README.md: README.sh sysz VERSION
 	./README.sh
@@ -38,6 +38,19 @@ github-release: VERSION sysz CHANGELOG.md README.md
 
 release: clean sysz README.md github-release
 
-
 install:
 	install -m755 sysz /usr/local/bin/
+
+# Build a Debian package (Depends: bash, fzf)
+deb:
+	./packaging/build-deb.sh dist
+
+lint:
+	shellcheck -x sysz packaging/build-deb.sh
+
+test: lint deb
+	./sysz --version | grep -F "$(VERSION)"
+	./sysz --help >/dev/null
+	# fzf dependency is declared in the control template and built package
+	grep -E 'Depends:.*fzf' debian/control packaging/build-deb.sh
+	dpkg-deb -f dist/sysz_$(VERSION)_all.deb Depends | grep -E 'fzf'

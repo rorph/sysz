@@ -1,8 +1,9 @@
-# [sysz](https://github.com/joehillen/sysz)
+# [sysz](https://github.com/rorph/sysz)
 
 A [fzf](https://github.com/junegunn/fzf) terminal UI for systemctl
 
-<a href="https://console.dev" title="Visit Console - the best tools for developers"><img src="https://console.dev/img/badges/1.0/svg/console-badge-logo-dark.svg" alt="Console - Developer Tool of the Week" /></a>
+Fork of [joehillen/sysz](https://github.com/joehillen/sysz) with Debian packaging,
+back-navigation from the command picker, and improved log follow.
 
 # Demo
 
@@ -10,7 +11,7 @@ A [fzf](https://github.com/junegunn/fzf) terminal UI for systemctl
 
 # Features
 
-VERSION: 1.4.3
+VERSION: 1.5.0
 
 - See and filter both system and user units simultaneously.
 - Supports all unit types.
@@ -18,6 +19,9 @@ VERSION: 1.4.3
 - Runs `sudo` automatically and only if necessary.
 - Filter units by state using `ctrl-s` or the `--state` option.
 - Run `daemon-reload` with `ctrl-r`.
+- Follow unit logs with `ctrl-f` or the `follow` / `f` command.
+- Back from the Commands menu (ESC / ctrl-b / ← / select **back**) returns to Units.
+- After any action, returns to the unit list instead of dropping to the shell.
 - Has short versions of systemctl commands to reduce typing.
 - Runs status after other commands (start, stop, restart, etc).
 - Select multiple units, states, and commands using `TAB`.
@@ -31,6 +35,23 @@ VERSION: 1.4.3
 - awk
 
 # Installation
+
+## Debian / Ubuntu (.deb)
+
+Build a package that declares the `fzf` dependency:
+
+```sh
+git clone https://github.com/rorph/sysz.git
+cd sysz
+make deb                    # → dist/sysz_*_all.deb
+sudo apt install ./dist/sysz_*_all.deb
+```
+
+`Depends: bash (>= 4.3), fzf (>= 0.27.1)` — apt will pull `fzf` if missing.
+
+CI builds the same package on every push/PR (GitHub Actions workflow artifact
+`sysz-deb`) and attaches `sysz_*.deb` to [GitHub Releases](https://github.com/rorph/sysz/releases)
+next to the bare script.
 
 ## Arch Linux
 
@@ -53,20 +74,20 @@ nix-env -iA nixpkgs.sysz
 ## Using [`bin`](https://github.com/marcosnils/bin)
 
 ```
-bin install https://github.com/joehillen/sysz
+bin install https://github.com/rorph/sysz
 ```
 
 ## Direct Download
 
 ```sh
-wget -O ~/.bin/sysz https://github.com/joehillen/sysz/releases/latest/download/sysz
+wget -O ~/.bin/sysz https://github.com/rorph/sysz/releases/latest/download/sysz
 chmod +x ~/.bin/sysz
 ```
 
 ## From Source
 
 ```sh
-git clone https://github.com/joehillen/sysz.git
+git clone https://github.com/rorph/sysz.git
 cd sysz
 sudo make install # /usr/local/bin/sysz
 ```
@@ -96,26 +117,36 @@ OPTS:
 CMD:
   start                  systemctl start <unit>
   stop                   systemctl stop <unit>
-  r, restart             systemctl restart <unit>
+  r, re, restart         systemctl restart <unit>
   s, stat, status        systemctl status <unit>
   ed, edit               systemctl edit <unit>
   reload                 systemctl reload <unit>
   en, enable             systemctl enable <unit>
   d, dis, disable        systemctl disable <unit>
   c, cat                 systemctl cat <unit>
+  j, journal             journalctl -xe for <unit>
+  f, follow              journalctl -xef (follow logs) for <unit>
 
   If no command is given, one or more can be chosen interactively.
 
 ARGS are passed to the systemctl command for each selected unit.
 
-Keybindings:
+Keybindings (Units):
   TAB           Toggle selection.
   ctrl-v        'cat' the unit in the preview window.
   ctrl-s        Select states to match. Selection is reset.
   ctrl-r        Run daemon-reload. Selection is reset.
+  ctrl-f        Follow journal logs for selected unit(s).
   ctrl-p        History previous.
   ctrl-n        History next.
   ?             Show keybindings.
+  ESC           Exit.
+
+Keybindings (Commands):
+  TAB           Toggle selection.
+  ESC / ctrl-b  Back to unit list.
+  left          Back to unit list.
+  Select "back" Return to unit list.
 
 History:
   sysz is stored in $XDG_CACHE_HOME/sysz/history
@@ -136,12 +167,14 @@ Examples with commands:
   sysz --sys s                Get the status of system units
   sysz --user edit            Edit user units
   sysz s -- -n100             Show status with 100 log lines
+  sysz f                      Follow logs for a unit
   sysz --sys -s active stop    Stop an active system unit
   sysz -u --state failed r    Restart failed user units
 ```
 
 # Acknowledgements
 
-Inspired by [fuzzy-sys](https://github.com/NullSense/fuzzy-sys) by [NullSense](https://github.com/NullSense/)
+Upstream: [joehillen/sysz](https://github.com/joehillen/sysz).
+Inspired by [fuzzy-sys](https://github.com/NullSense/fuzzy-sys) by [NullSense](https://github.com/NullSense/).
 
 Thank you for [ShellCheck](https://github.com/koalaman/shellcheck) without which this would be a buggy mess.

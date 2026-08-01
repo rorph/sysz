@@ -1,0 +1,37 @@
+# SYS-6: build the Debian package on every push/PR and expose it as an artifact.
+name: deb
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build .deb
+        run: make deb
+
+      - name: Verify package metadata
+        run: |
+          set -euo pipefail
+          VERSION=$(tr -d '[:space:]' <VERSION)
+          DEB="dist/sysz_${VERSION}_all.deb"
+          test -f "$DEB"
+          dpkg-deb -I "$DEB"
+          dpkg-deb -f "$DEB" Depends | grep -E 'fzf'
+          dpkg-deb -f "$DEB" Depends | grep -E 'bash'
+          # Architecture-independent package
+          test "$(dpkg-deb -f "$DEB" Architecture)" = "all"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysz-deb
+          path: dist/*.deb
+          if-no-files-found: error

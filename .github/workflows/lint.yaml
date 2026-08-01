@@ -1,11 +1,16 @@
 name: lint
-on: [push, pull_request]
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
 jobs:
-  build:
+  shellcheck:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Run sh-checker
         uses: luizm/action-sh-checker@master

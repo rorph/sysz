@@ -1,0 +1,16 @@
+Source: sysz
+Section: utils
+Priority: optional
+Maintainer: Rod <rod@overflow.biz>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/rorph/sysz
+Rules-Requires-Root: no
+
+Package: sysz
+Architecture: all
+Depends: bash (>= 4.3), fzf (>= 0.27.1), ${misc:Depends}
+Description: fzf terminal UI for systemctl
+ Interactive fuzzy-finder frontend for systemctl and journalctl.
+ Supports system and user units, multi-select, state filters,
+ journal follow, and back-navigation in the command picker.

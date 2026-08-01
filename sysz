@@ -7,20 +7,34 @@ shopt -s extglob
 export SHELL=bash
 
 PROG=$(basename "$0")
-SYSZ_VERSION=1.4.3
+SYSZ_VERSION=1.5.0
 SYSZ_HISTORY=${SYSZ_HISTORY:-${XDG_CACHE_HOME:-~/.cache}/sysz/history}
 declare -a STATES
+declare -a MANAGERS
+declare -a UNITS
+declare -a CMDS
+declare -a ARGS
+declare CMD
+declare VERBOSE
 
 _sysz_keys() {
   cat <<EOF
-Keybindings:
+Keybindings (Units):
   TAB           Toggle selection.
   ctrl-v        'cat' the unit in the preview window.
   ctrl-s        Select states to match. Selection is reset.
   ctrl-r        Run daemon-reload. Selection is reset.
+  ctrl-f        Follow journal logs for selected unit(s).
   ctrl-p        History previous.
   ctrl-n        History next.
   ?             Show keybindings.
+  ESC           Exit.
+
+Keybindings (Commands):
+  TAB           Toggle selection.
+  ESC / ctrl-b  Back to unit list.
+  left          Back to unit list.
+  Select "back" Return to unit list.
 EOF
 }
 
@@ -48,13 +62,15 @@ OPTS:
 CMD:
   start                  systemctl start <unit>
   stop                   systemctl stop <unit>
-  r, restart             systemctl restart <unit>
+  r, re, restart         systemctl restart <unit>
   s, stat, status        systemctl status <unit>
   ed, edit               systemctl edit <unit>
   reload                 systemctl reload <unit>
   en, enable             systemctl enable <unit>
   d, dis, disable        systemctl disable <unit>
   c, cat                 systemctl cat <unit>
+  j, journal             journalctl -xe for <unit>
+  f, follow              journalctl -xef (follow logs) for <unit>
 
   If no command is given, one or more can be chosen interactively.
 
@@ -81,6 +97,7 @@ Examples with commands:
   $PROG --sys s                Get the status of system units
   $PROG --user edit            Edit user units
   $PROG s -- -n100             Show status with 100 log lines
+  $PROG f                      Follow logs for a unit
   $PROG --sys -s active stop    Stop an active system unit
   $PROG -u --state failed r    Restart failed user units
 EOF
@@ -90,6 +107,7 @@ EOF
 
 _sysz_run() {
   [[ $VERBOSE = true ]] && echo '>' "$@" >&2
+  # shellcheck disable=SC2294 # intentional: command line assembled as string
   eval "$@" || return $?
 }
 
@@ -114,7 +132,6 @@ _sysz_journalctl() {
       _sysz_run journalctl --unit="$2" "${@:3}"
     fi
   fi
-
 }
 
 _sysz_manager() {
@@ -168,30 +185,30 @@ _sysz_sort() {
   local str
   local mgr
   local unit
-  local n
+  local rank
   while IFS= read -r str; do
     mgr=${str%% *}
     unit_colored=${str##* }
     unit=${unit_colored//$'\e'[\[(]*([0-9;])[@-n]/}
 
     if [[ $unit =~ \.service$ ]]; then
-      n=0
-      [[ $mgr = "[system]" ]] && n=1
+      rank=0
+      [[ $mgr = "[system]" ]] && rank=1
     elif [[ $unit =~ \.timer$ ]]; then
-      n=2
-      [[ $mgr = "[system]" ]] && n=3
+      rank=2
+      [[ $mgr = "[system]" ]] && rank=3
     elif [[ $unit =~ \.socket$ ]]; then
-      n=4
-      [[ $mgr = "[system]" ]] && n=5
+      rank=4
+      [[ $mgr = "[system]" ]] && rank=5
     elif [[ $mgr = "[user]" ]]; then
-      n=6
+      rank=6
     else
       # then the rest based on file extension
-      n=7
+      rank=7
     fi
     type=${unit##*.}
     unit_undashed=${unit//-/}
-    echo "$n$type$unit_undashed $mgr $unit_colored"
+    echo "$rank$type$unit_undashed $mgr $unit_colored"
   done | sort -bifu | cut -d' ' -f2-
 }
 
@@ -218,7 +235,7 @@ _sysz_list() {
       elif [[ $line = *" failed "* ]]; then
         printf '\033[0;31m%s\033[0m\n' "$unit" # red
       elif [[ $line = *" not-found "* ]]; then
-        printf '\033[1;33m%s\033[0m\n' "$unit" # red
+        printf '\033[1;33m%s\033[0m\n' "$unit" # yellow
       else
         echo "$unit"
       fi
@@ -229,6 +246,294 @@ _sysz_list_units() {
   for MANAGER in "${MANAGERS[@]}"; do
     _sysz_list "--$MANAGER" | sed -e "s/^/[$MANAGER] /"
   done | _sysz_sort
+}
+
+_sysz_daemon_reload() {
+  (
+    if [[ $EUID -ne 0 ]]; then
+      echo '[system] daemon-reload'
+    fi
+    echo '[user] daemon-reload'
+  ) |
+    fzf \
+      --multi \
+      --no-info \
+      --prompt="Reload: " |
+    readarray -t RELOADS || return 0
+
+  for RELOAD in "${RELOADS[@]}"; do
+    case $RELOAD in
+    '[user] daemon-reload')
+      _sysz_systemctl --user daemon-reload >&2
+      ;;
+    '[system] daemon-reload')
+      _sysz_systemctl --system daemon-reload >&2
+      ;;
+    esac
+  done
+}
+
+_sysz_states() {
+  # hide 'ing' because they are transient states
+  # which people probably aren't looking for
+  systemctl --state=help |
+    grep -v ':' |
+    grep -v 'ing' |
+    sort -u |
+    grep -v '^$' |
+    fzf \
+      --multi \
+      --prompt="States: " |
+    readarray -t PICKED_STATES || return 0
+
+  if [[ ${#PICKED_STATES[@]} -gt 0 ]]; then
+    STATES=()
+  fi
+
+  for STATE in "${PICKED_STATES[@]}"; do
+    STATES+=("--state=$STATE")
+  done
+}
+
+# Resolve parametrized units (foo@.service) by prompting for the instance name.
+_sysz_resolve_template_units() {
+  local i UNIT PARAM
+  for i in "${!UNITS[@]}"; do
+    UNIT=${UNITS[$i]}
+    if [[ ${UNIT##* } = *@.* ]]; then
+      read -r -p "${UNIT##* } requires a parameter: " PARAM || return 1
+      if [[ -z $PARAM ]]; then
+        echo "ERROR: ${UNIT##* } requires a parameter" >&2
+        return 1
+      fi
+      UNITS[i]=${UNIT/\@/\@${PARAM}}
+    fi
+  done
+  return 0
+}
+
+# Pick units. Sets UNITS.
+# Returns:
+#   0  units selected (or ACTION set for quick actions)
+#   1  cancelled / exit
+# Sets ACTION=follow when ctrl-f is used.
+_sysz_select_units() {
+  local KEY
+  local -a PICKS
+  ACTION=
+
+  while :; do
+    UNITS=()
+    KEY=
+    PICKS=()
+
+    # prompt units
+    _sysz_list_units |
+      fzf \
+        --multi \
+        --ansi \
+        --expect=ctrl-r,ctrl-s,ctrl-f \
+        --history="$SYSZ_HISTORY" \
+        --prompt="Units: " \
+        --header 'ESC exit · ctrl-f follow · ? keys' \
+        --bind "?:preview(echo '$(_sysz_keys)')" \
+        --bind "ctrl-v:preview('${BASH_SOURCE[0]}' _fzf_cat {})" \
+        --preview="'${BASH_SOURCE[0]}' _fzf_preview {}" \
+        --preview-window=70% |
+      readarray -t PICKS || true
+
+    KEY=${PICKS[0]}
+    [[ $VERBOSE = true ]] && echo "KEY: $KEY" >&2
+    UNITS=("${PICKS[@]:1}")
+
+    case $KEY in
+    ctrl-r)
+      _sysz_daemon_reload
+      continue
+      ;;
+    ctrl-s)
+      _sysz_states
+      continue
+      ;;
+    ctrl-f)
+      if [[ ${#UNITS[@]} -eq 0 ]]; then
+        continue
+      fi
+      ACTION=follow
+      _sysz_resolve_template_units || return 1
+      return 0
+      ;;
+    esac
+
+    if [[ ${#UNITS[@]} -eq 0 ]]; then
+      return 1
+    fi
+
+    _sysz_resolve_template_units || return 1
+    return 0
+  done
+}
+
+# Pick commands for the current UNITS. Sets CMDS.
+# Returns:
+#   0  commands selected
+#   1  back to unit list (ESC / ctrl-b / left / "back")
+_sysz_select_commands() {
+  local KEY
+  local ACTIVE_STATE LOAD_STATE UNIT_FILE_STATE CAN_RELOAD
+  local UNIT PREVIEW_CMD MULTI
+  local -a PICKS
+
+  CMDS=()
+  PICKS=()
+  MULTI=false
+
+  if [[ ${#UNITS[@]} -gt 1 ]]; then
+    printf -v PREVIEW '%s\n' "${UNITS[@]}"
+    PREVIEW_CMD="echo -n '$PREVIEW'"
+    MULTI=true
+  else
+    UNIT=${UNITS[0]}
+    ACTIVE_STATE=$(_sysz_show "$UNIT" ActiveState)
+    LOAD_STATE=$(_sysz_show "$UNIT" LoadState)
+    UNIT_FILE_STATE=$(_sysz_show "$UNIT" UnitFileState)
+    CAN_RELOAD=$(_sysz_show "$UNIT" CanReload)
+    PREVIEW_CMD="'${BASH_SOURCE[0]}' _fzf_preview '$UNIT'"
+  fi
+
+  # prompt commands — ESC / ctrl-b / left / "back" return to unit list
+  fzf \
+    --multi \
+    --ansi \
+    --no-info \
+    --expect=ctrl-b,left \
+    --prompt="Commands: " \
+    --header 'ESC/ctrl-b/← back to units' \
+    --preview="$PREVIEW_CMD" \
+    --preview-window=80% < <(
+      printf '\033[0;36m%s\033[0m\n' back # cyan — return to unit list
+
+      # status
+      echo status "${ARGS[*]}"
+      # restart
+      [[ $MULTI = true || $ACTIVE_STATE = active ]] &&
+        printf '\033[0;31m%s\033[0m %s\n' restart "${ARGS[*]}" # red
+      # start
+      [[ $MULTI = true || $ACTIVE_STATE != active ]] &&
+        printf '\033[0;32m%s\033[0m %s\n' start "${ARGS[*]}" # green
+      # stop
+      [[ $MULTI = true || $ACTIVE_STATE = active ]] &&
+        printf '\033[0;31m%s\033[0m %s\n' stop "${ARGS[*]}" # red
+      # enable
+      [[ $MULTI = true || $UNIT_FILE_STATE != enabled ]] &&
+        {
+          printf '\033[0;32m%s\033[0m %s\n' "enable" "${ARGS[*]}" # green
+          printf '\033[0;32m%s\033[0m %s\n' "enable" "--now ${ARGS[*]}"
+        }
+      # disable
+      [[ $MULTI = true || $UNIT_FILE_STATE = enabled ]] &&
+        {
+          printf '\033[0;31m%s\033[0m %s\n' disable "${ARGS[*]}" # red
+          printf '\033[0;31m%s\033[0m %s\n' disable "--now ${ARGS[*]}"
+        }
+
+      # journal / follow
+      echo journal "${ARGS[*]}"
+      printf '\033[0;35m%s\033[0m %s\n' follow "${ARGS[*]}" # magenta
+
+      # reload
+      [[ $MULTI = true || $CAN_RELOAD = yes ]] &&
+        printf '\033[0;37m%s\033[0m %s\n' reload "${ARGS[*]}"
+
+      # mask
+      [[ $MULTI = true || ($UNIT_FILE_STATE != masked && $LOAD_STATE != masked) ]] &&
+        printf '\033[0;31m%s\033[0m %s\n' mask "${ARGS[*]}" # red
+      [[ $MULTI = true || $UNIT_FILE_STATE = masked || $LOAD_STATE = masked ]] &&
+        printf '\033[0;32m%s\033[0m %s\n' unmask "${ARGS[*]}" # green
+
+      # cat
+      echo cat "${ARGS[*]}"
+      # edit
+      echo edit "${ARGS[*]}"
+      # show
+      echo show "${ARGS[*]}"
+    ) |
+    readarray -t PICKS || true
+
+  KEY=${PICKS[0]}
+  CMDS=("${PICKS[@]:1}")
+
+  case $KEY in
+  ctrl-b | left)
+    return 1
+    ;;
+  esac
+
+  if [[ ${#CMDS[@]} -eq 0 ]]; then
+    # ESC / abort with no selection → back
+    return 1
+  fi
+
+  # If the only / any selection is the synthetic "back" entry, go back.
+  local c cleaned has_real=false
+  local -a REAL_CMDS=()
+  for c in "${CMDS[@]}"; do
+    cleaned=${c//$'\e'[\[(]*([0-9;])[@-n]/}
+    cleaned=${cleaned%% *}
+    if [[ $cleaned = back ]]; then
+      continue
+    fi
+    has_real=true
+    REAL_CMDS+=("$c")
+  done
+
+  if [[ $has_real = false ]]; then
+    return 1
+  fi
+
+  CMDS=("${REAL_CMDS[@]}")
+  return 0
+}
+
+# Run CMDS against UNITS. View commands (status/journal/follow/cat/show)
+# always return; mutating commands show status after.
+_sysz_run_commands() {
+  local PICK MANAGER UNIT CMD CODE=0
+
+  for PICK in "${UNITS[@]}"; do
+    MANAGER=$(_sysz_manager "$PICK")
+    UNIT=${PICK##* }
+
+    for CMD in "${CMDS[@]}"; do
+      # Strip ANSI if any leaked through
+      CMD=${CMD//$'\e'[\[(]*([0-9;])[@-n]/}
+
+      case ${CMD%% *} in
+      journal)
+        # Ctrl-C should only stop journalctl, not sysz
+        _sysz_journalctl "$MANAGER" "$UNIT" -xe "${ARGS[@]}" || true
+        ;;
+      follow)
+        echo "Following logs for $UNIT (Ctrl-C to stop)..." >&2
+        _sysz_journalctl "$MANAGER" "$UNIT" -xef "${ARGS[@]}" || true
+        ;;
+      status)
+        # shellcheck disable=2086
+        SYSTEMD_COLORS=1 systemctl "$MANAGER" $CMD --no-pager "${ARGS[@]}" -- "$UNIT" || true
+        ;;
+      cat | show)
+        _sysz_systemctl "$MANAGER" "$CMD" "${ARGS[@]}" -- "$UNIT" || true
+        ;;
+      *)
+        # shellcheck disable=2086
+        _sysz_systemctl "$MANAGER" $CMD "${ARGS[@]}" -- "$UNIT" || CODE=$?
+        SYSTEMD_COLORS=1 systemctl "$MANAGER" status --no-pager -- "$UNIT" || true
+        ;;
+      esac
+    done
+  done
+
+  return "$CODE"
 }
 
 # main
@@ -293,8 +598,8 @@ for STATE in "${STATES[@]}"; do
   fi
 done
 
-declare CMD
-declare -a ARGS
+CMD=
+ARGS=()
 while [[ -n $1 ]]; do
   case $1 in
   _fzf_preview)
@@ -312,7 +617,7 @@ while [[ -n $1 ]]; do
   re)
     CMD=restart
     ;;
-  s)
+  s | stat)
     CMD=status
     ;;
   ed)
@@ -339,7 +644,7 @@ while [[ -n $1 ]]; do
     break
     ;;
   -*)
-    echo "ERROR: Unknown option: $1" 2>&1
+    echo "ERROR: Unknown option: $1" >&2
     exit 1
     ;;
   *)
@@ -353,223 +658,35 @@ done
 mkdir -p "$(dirname "$SYSZ_HISTORY")"
 touch "$SYSZ_HISTORY"
 
-function join_by {
-  # https://stackoverflow.com/a/17841619/334632
-  local d=${1-} f=${2-}
-  if shift 2; then
-    printf %s "$f" "${@/#/$d}"
-  fi
-}
-
-_sysz_daemon_reload() {
-  (
-    if [[ $EUID -ne 0 ]]; then
-      echo '[system] daemon-reload'
-    fi
-    echo '[user] daemon-reload'
-  ) |
-    fzf \
-      --multi \
-      --no-info \
-      --prompt="Reload: " |
-    readarray -t RELOADS || exit $?
-
-  for RELOAD in "${RELOADS[@]}"; do
-    case $RELOAD in
-    '[user] daemon-reload')
-      _sysz_systemctl --user daemon-reload >&2
-      ;;
-    '[system] daemon-reload')
-      _sysz_systemctl --system daemon-reload >&2
-      ;;
-    esac
-  done
-}
-
-_sysz_states() {
-  # hide 'ing' because they are transient states
-  # which people probably aren't looking for
-  systemctl --state=help |
-    grep -v ':' |
-    grep -v 'ing' |
-    sort -u |
-    grep -v '^$' |
-    fzf \
-      --multi \
-      --prompt="States: " |
-    readarray -t PICKED_STATES || exit $?
-
-  if [[ ${#PICKED_STATES[@]} -gt 0 ]]; then
-    STATES=()
-  fi
-
-  for STATE in "${PICKED_STATES[@]}"; do
-    STATES+=("--state=$STATE")
-  done
-}
-
-while :; do
-  UNITS=()
-  KEY=
-
-  # prompt units
-  _sysz_list_units |
-    fzf \
-      --multi \
-      --ansi \
-      --expect=ctrl-r,ctrl-s \
-      --history="$SYSZ_HISTORY" \
-      --prompt="Units: " \
-      --header '? for keybindings' \
-      --bind "?:preview(echo '$(_sysz_keys)')" \
-      --bind "ctrl-v:preview('${BASH_SOURCE[0]}' _fzf_cat {})" \
-      --preview="'${BASH_SOURCE[0]}' _fzf_preview {}" \
-      --preview-window=70% |
-    readarray -t PICKS
-
-  KEY=${PICKS[0]}
-  [[ $VERBOSE = true ]] && echo "KEY: $KEY" >&2
-  UNITS=("${PICKS[@]:1}")
-
-  case $KEY in
-  ctrl-r)
-    _sysz_daemon_reload
-    continue
-    ;;
-  ctrl-s)
-    _sysz_states
-    continue
-    ;;
-  esac
-
-  if [[ ${#UNITS[@]} -eq 0 ]]; then
-    exit 1
-  fi
-
-  break
-
-done
-
-[[ $VERBOSE = true ]] && printf 'UNIT: %s\n' "${UNITS[@]}" >&2
-
-declare -a CMDS
+# --- CLI command given: pick units once, run, exit ---
 if [[ -n $CMD ]]; then
-  CMDS=("$CMD")
-else
-
-  if [[ ${#UNITS[@]} -gt 1 ]]; then
-    printf -v PREVIEW '%s\n' "${UNITS[@]}"
-    PREVIEW_CMD="echo -n '$PREVIEW'"
-    MULTI=true
+  _sysz_select_units || exit 1
+  if [[ $ACTION = follow ]]; then
+    CMDS=(follow)
   else
-    UNIT=${UNITS[0]}
+    CMDS=("$CMD")
+  fi
+  _sysz_run_commands
+  exit $?
+fi
 
-    if [[ $UNIT = *@.* ]]; then
-      read -r -p "$UNIT requires a parameter: " PARAM ||
-        if [[ -z $PARAM ]]; then
-          echo "ERROR: $UNIT requires a parameter"
-          exit 1
-        fi
+# --- Interactive TUI loop ---
+# ESC on unit list exits; ESC/back on command list returns to units.
+# After any action (including follow), return to the unit list.
+while true; do
+  ACTION=
+  _sysz_select_units || exit 0
 
-      UNIT=${UNIT/\@/\@${PARAM}}
-      UNITS[0]=$UNIT
-    fi
-
-    ACTIVE_STATE=$(_sysz_show "$UNIT" ActiveState)
-    LOAD_STATE=$(_sysz_show "$UNIT" LoadState)
-    UNIT_FILE_STATE=$(_sysz_show "$UNIT" UnitFileState)
-    CAN_RELOAD=$(_sysz_show "$UNIT" CanReload)
-    PREVIEW_CMD="'${BASH_SOURCE[0]}' _fzf_preview '$UNIT'"
+  if [[ $ACTION = follow ]]; then
+    CMDS=(follow)
+    _sysz_run_commands || true
+    continue
   fi
 
-  # prompt commands
-  fzf \
-    --multi \
-    --ansi \
-    --no-info \
-    --prompt="Commands: " \
-    --preview="$PREVIEW_CMD" \
-    --preview-window=80% < <(
-      # status
-      echo status "${ARGS[*]}"
-      # restart
-      [[ $MULTI = true || $ACTIVE_STATE = active ]] &&
-        printf '\033[0;31m%s\033[0m %s\n' restart "${ARGS[*]}" # red
-      # start
-      [[ $MULTI = true || $ACTIVE_STATE != active ]] &&
-        printf '\033[0;32m%s\033[0m %s\n' start "${ARGS[*]}" # green
-      # stop
-      [[ $MULTI = true || $ACTIVE_STATE = active ]] &&
-        printf '\033[0;31m%s\033[0m %s\n' stop "${ARGS[*]}" # red
-      # enable
-      [[ $MULTI = true || $UNIT_FILE_STATE != enabled ]] &&
-        {
-          printf '\033[0;32m%s\033[0m %s\n' "enable" "${ARGS[*]}" # green
-          printf '\033[0;32m%s\033[0m %s\n' "enable" "--now ${ARGS[*]}"
-        }
-      # disable
-      [[ $MULTI = true || $UNIT_FILE_STATE = enabled ]] &&
-        {
-          printf '\033[0;31m%s\033[0m %s\n' disable "${ARGS[*]}" # red
-          printf '\033[0;31m%s\033[0m %s\n' disable "--now ${ARGS[*]}"
-        }
+  if ! _sysz_select_commands; then
+    # back to unit list
+    continue
+  fi
 
-      # journal
-      echo journal "${ARGS[*]}"
-      echo follow "${ARGS[*]}"
-
-      # reload
-      [[ $MULTI = true || $CAN_RELOAD = yes ]] &&
-        printf '\033[0;37m%s\033[0m %s\n' reload "${ARGS[*]}" # green
-
-      # mask
-      [[ $MULTI = true || ($UNIT_FILE_STATE != masked && $LOAD_STATE != masked) ]] &&
-        printf '\033[0;31m%s\033[0m %s\n' mask "${ARGS[*]}" # red
-      [[ $MULTI = true || $UNIT_FILE_STATE = masked || $LOAD_STATE = masked ]] &&
-        printf '\033[0;32m%s\033[0m %s\n' unmask "${ARGS[*]}" # green
-
-      # cat
-      echo cat "${ARGS[*]}"
-      # edit
-      echo edit "${ARGS[*]}"
-      # show
-      echo show "${ARGS[*]}"
-    ) |
-    readarray -t CMDS || exit $?
-fi
-
-if [[ ${#CMDS[@]} -eq 0 ]]; then
-  exit 1
-fi
-
-for PICK in "${UNITS[@]}"; do
-
-  MANAGER=$(_sysz_manager "$PICK")
-  UNIT=${PICK##* }
-
-  for CMD in "${CMDS[@]}"; do
-    case ${CMD%% *} in
-    journal)
-      _sysz_journalctl "$MANAGER" "$UNIT" -xe "${ARGS[@]}"
-      ;;
-    follow)
-      _sysz_journalctl "$MANAGER" "$UNIT" -xef "${ARGS[@]}"
-      ;;
-    status)
-      # shellcheck disable=2086
-      SYSTEMD_COLORS=1 systemctl "$MANAGER" $CMD --no-pager "${ARGS[@]}" -- "$UNIT"
-      ;;
-    cat | show)
-      _sysz_systemctl "$MANAGER" "$CMD" "${ARGS[@]}" -- "$UNIT" || exit $?
-      ;;
-    *)
-      # shellcheck disable=2086
-      _sysz_systemctl "$MANAGER" $CMD "${ARGS[@]}" -- "$UNIT" || CODE=$?
-      SYSTEMD_COLORS=1 systemctl "$MANAGER" status --no-pager -- "$UNIT"
-      if [[ ${#UNITS[@]} -eq 1 ]]; then
-        exit $CODE
-      fi
-      ;;
-    esac
-  done
+  _sysz_run_commands || true
 done

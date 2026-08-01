@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-31
+
+Fork improvements (`rorph/sysz` / YouTrack SYS-2).
+
+### Added
+
+- Debian package build (`make deb` / `packaging/build-deb.sh`) with
+  `Depends: bash (>= 4.3), fzf (>= 0.27.1)` (SYS-3)
+- GitHub Actions CI builds the `.deb` on push/PR (artifact) and attaches it
+  to GitHub Releases alongside the bare `sysz` script (SYS-6)
+- Back navigation from the Commands picker to the Units list:
+  ESC, ctrl-b, left arrow, or select **back** (SYS-4)
+- Interactive TUI loop: after any action (including follow), return to the unit list
+- `ctrl-f` on the unit list to follow journal logs for the selected unit(s) (SYS-5)
+- Documented `journal` / `follow` (and short forms `j` / `f`) in help
+
+### Changed
+
+- Cancelling the Commands picker no longer exits to the shell
+- Ctrl-C during `follow` / `journal` only stops journalctl, not sysz
+- `follow` highlighted in the command menu
+
 ## [1.4.3] - 2021-10-11
 
 ### Fixed
